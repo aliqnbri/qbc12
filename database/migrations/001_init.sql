@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS raw.products (
 
 CREATE TABLE IF NOT EXISTS raw.marketing_qualified_leads (
     mql_id             VARCHAR(64) PRIMARY KEY,
-    first_contact_date TIMESTAMP   NOT NULL,
+    first_contact_date TIMESTAMP, -- nullable: some source rows have no contact date
     landing_page_id    VARCHAR(64),
     origin             VARCHAR(64)
 );

@@ -119,7 +119,10 @@ class RawMarketingQualifiedLead(Base):
     __table_args__ = {"schema": RAW_SCHEMA}
 
     mql_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    first_contact_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Nullable: a handful of rows in the source CSV genuinely have no
+    # first_contact_date. The raw schema mirrors the source as-is; date
+    # completeness is enforced downstream in feature engineering instead.
+    first_contact_date: Mapped[datetime | None] = mapped_column(DateTime)
     landing_page_id: Mapped[str | None] = mapped_column(String(64))
     origin: Mapped[str | None] = mapped_column(String(64))
 
