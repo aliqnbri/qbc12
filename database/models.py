@@ -141,6 +141,10 @@ class RawClosedDeal(Base):
     lead_behaviour_profile: Mapped[str | None] = mapped_column(String(64))
     has_company: Mapped[bool | None] = mapped_column(Boolean)
     has_gtin: Mapped[bool | None] = mapped_column(Boolean)
+    # average_stock is a bucketed range descriptor in the source CSV
+    # (e.g. "up_to_30", "1-10"), not a true numeric — stored as text.
+    average_stock: Mapped[str | None] = mapped_column(String(64))
+    business_type: Mapped[str | None] = mapped_column(String(64))
     declared_product_catalog_size: Mapped[float | None] = mapped_column(Float)
     declared_monthly_revenue: Mapped[float | None] = mapped_column(Float)
 

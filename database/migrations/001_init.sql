@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS raw.closed_deals (
     lead_behaviour_profile        VARCHAR(64),
     has_company                   BOOLEAN,
     has_gtin                      BOOLEAN,
+    average_stock                 VARCHAR(64), -- bucketed range text (e.g. "up_to_30"), not numeric
+    business_type                 VARCHAR(64),
     declared_product_catalog_size DOUBLE PRECISION,
     declared_monthly_revenue      DOUBLE PRECISION
 );
