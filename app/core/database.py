@@ -1,4 +1,4 @@
-# core/database.py
+# app/core/database.py
 """
 Database connection management and session handling.
 Provides both sync and async SQLAlchemy engines with connection pooling.
@@ -7,6 +7,9 @@ Provides both sync and async SQLAlchemy engines with connection pooling.
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, contextmanager, closing
 from typing import Any
+from io import StringIO
+import time
+
 import psycopg2
 import polars as pl
 from loguru import logger
@@ -19,9 +22,14 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, declared_attr
 from sqlmodel import SQLModel
-from io import StringIO
-import time
+
 from app.core.config import settings
+
+# Import all models to register them in SQLModel.metadata
+# در بخش imports اضافه کن:
+import app.models
+
+
 
 # ============================================================================
 # Base ORM Model
@@ -53,7 +61,6 @@ class Base(DeclarativeBase):
 async_engine: AsyncEngine = create_async_engine(
     settings.async_database_url,
     echo=settings.postgres_echo,
-    # poolclass=QueuePool,
     pool_size=settings.postgres_pool_size,
     max_overflow=settings.postgres_max_overflow,
     pool_pre_ping=settings.postgres_pool_pre_ping,
@@ -72,7 +79,6 @@ async_engine: AsyncEngine = create_async_engine(
 sync_engine = create_engine(
     settings.database_url,  # sync URL (postgresql://)
     echo=settings.postgres_echo,
-    # poolclass=QueuePool,
     pool_size=settings.postgres_pool_size,
     max_overflow=settings.postgres_max_overflow,
     pool_pre_ping=settings.postgres_pool_pre_ping,
@@ -158,12 +164,12 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
 # Schema & Table Management
 # ============================================================================
 
-def create_schemas_and_tables() -> None:
+def create_schemas_and_tables(force_recreate: bool = False) -> None:
     """
-    Create schemas (raw, processed) and all SQLModel tables.
+    Create schemas (raw, processed, predictions) and all SQLModel tables.
     
-    Uses CREATE SCHEMA IF NOT EXISTS and SQLModel.metadata.create_all.
-    Idempotent: safe to run multiple times.
+    Args:
+        force_recreate: If True, drop all existing tables before recreating
     """
     logger.info("Initializing database schemas and tables...")
     
@@ -175,14 +181,22 @@ def create_schemas_and_tables() -> None:
             settings.postgres_schema_predictions,
         ]:
             conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
-
-        logger.info("✓ Schemas created: raw, processed")
         
-        # Create all tables from SQLModel metadata
-        SQLModel.metadata.create_all(sync_engine)
-        
-        
-        logger.info("✓ Indexes created")
+        logger.info("✓ Schemas created: raw, processed, predictions")
+    
+    # Log registered tables count
+    table_count = len(SQLModel.metadata.tables)
+    logger.info(f"✓ {table_count} tables registered in metadata")
+    
+    # Force recreate tables if requested (fixes dtype mismatches)
+    if force_recreate:
+        logger.warning("  Dropping all tables for recreation (force_recreate=True)")
+        SQLModel.metadata.drop_all(sync_engine)
+        logger.info("✓ Tables dropped")
+    
+    # Create all tables from SQLModel metadata
+    SQLModel.metadata.create_all(sync_engine)
+    logger.info("✓ Tables created from SQLModel metadata")
 
 
 # ============================================================================
@@ -210,15 +224,13 @@ async def close_db_connections() -> None:
     """
     logger.info("Closing database connections...")
     await async_engine.dispose()
-    await sync_engine.dispose()  # ✅ Also dispose sync engine
+    sync_engine.dispose()
     logger.info("✓ Database connections closed")
 
 
 # ============================================================================
 # Bulk Insert Utilities
 # ============================================================================
-
-
 
 def truncate_table(table_name: str, schema: str = "raw") -> None:
     """
@@ -227,10 +239,8 @@ def truncate_table(table_name: str, schema: str = "raw") -> None:
     """
     logger.warning(f"Truncating {schema}.{table_name}...")
     with sync_engine.begin() as conn:
-        conn.execute(text(f'TRUNCATE TABLE "{schema}"."{table_name}" CASCADE'))
+        conn.execute(text(f'TRUNCATE TABLE "{schema}"."{table_name}" RESTART IDENTITY CASCADE'))
     logger.info(f"✓ Table {schema}.{table_name} truncated")
-
-
 
 
 def _build_sync_url() -> str:
@@ -239,10 +249,21 @@ def _build_sync_url() -> str:
 
 
 @contextmanager
-def get_sync_conn(retries: int = 3, backoff_factor: float = 1.0,autocommit: bool = False):
-    """Context manager with exponential backoff retry for transient failures.
+def get_sync_conn(retries: int = 3, backoff_factor: float = 1.0, autocommit: bool = False):
+    """
+    Context manager with exponential backoff retry for transient failures.
     
     Yields a psycopg2 connection. Automatically rolls back on exception.
+    
+    Args:
+        retries: Number of connection attempts
+        backoff_factor: Base delay for exponential backoff (seconds)
+        autocommit: Whether to enable autocommit mode
+    
+    Usage:
+        with get_sync_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM raw.orders")
     """
     conn = None
     for attempt in range(1, retries + 1):
@@ -255,16 +276,14 @@ def get_sync_conn(retries: int = 3, backoff_factor: float = 1.0,autocommit: bool
             if attempt < retries:
                 wait = backoff_factor * (2 ** (attempt - 1))
                 logger.warning(f"  ⏳ Connection attempt {attempt}/{retries} failed, retrying in {wait}s...")
-                import time
                 time.sleep(wait)
             else:
+                logger.error(f"  ✗ Connection failed after {retries} attempts")
                 raise
         finally:
             if conn:
                 conn.close()
 
-
-# ── PostgreSQL COPY ────────────────────────────────────────────────────────
 
 def _pg_copy(
     df: pl.DataFrame,
@@ -273,13 +292,24 @@ def _pg_copy(
     conn,
     truncate: bool = False,
 ) -> int:
-    """High-performance bulk insert via PostgreSQL COPY.
+    """
+    High-performance bulk insert via PostgreSQL COPY.
     
     Uses COPY FROM STDIN with CSV format for maximum throughput (~10x faster
     than INSERT statements).
     
+    Args:
+        df: Polars DataFrame to insert
+        schema: Target schema name (e.g., "raw", "processed")
+        table: Target table name
+        conn: psycopg2 connection object
+        truncate: If True, truncate table before inserting
+    
     Returns:
-        Number of rows inserted.
+        Number of rows inserted
+    
+    Raises:
+        Exception: If COPY operation fails
     """
     buf = StringIO()
     df.write_csv(

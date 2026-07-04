@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 from app.pipelines.ingestion.manager import IngestionManager
+from app.core.database import create_schemas_and_tables  
+import app.models 
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,7 +20,7 @@ def task_load_raw_data(**context: Any) -> dict[str, Any]:
     
     """
     logger.info("Airflow Task: Starting raw data ingestion")
-    
+    create_schemas_and_tables()
     manager = IngestionManager(
         data_dir=None,  # Use settings.raw_data_dir
         truncate_before_load=True,

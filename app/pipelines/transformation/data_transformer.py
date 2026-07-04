@@ -1,4 +1,4 @@
-# File: app/pipelines/transformation/transformer.py
+# File: app/pipelines/transformation/data_transformer.py
 """
 Data transformation pipeline: raw CSV → schema-compliant processed data.
 """
@@ -15,10 +15,6 @@ logger = logging.getLogger(__name__)
 class DataTransformationError(Exception):
     """Raised when data transformation or validation fails."""
     pass
-
-
-
-
 
 
 def rename_csv_aliases(df: pl.DataFrame, table_name: str) -> pl.DataFrame:
@@ -42,9 +38,6 @@ def rename_csv_aliases(df: pl.DataFrame, table_name: str) -> pl.DataFrame:
     return df
 
 
-
-
-
 def detect_and_parse_timestamps(df: pl.DataFrame) -> pl.DataFrame:
     """
     Auto-detect and parse timestamp columns from strings.
@@ -64,8 +57,7 @@ def detect_and_parse_timestamps(df: pl.DataFrame) -> pl.DataFrame:
             if any(pattern in col.lower() for pattern in timestamp_patterns):
                 try:
                     cleaned = pl.col(col).str.strip_chars()
-                    # Try full datetime, then fall back to date-only — coalesce picks
-                    # whichever succeeds per-value (no reliance on exceptions)
+                    # Try full datetime, then fall back to date-only
                     df = df.with_columns(
                         pl.coalesce(
                             cleaned.str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False),
@@ -140,31 +132,65 @@ def apply_schema_transformations(df: pl.DataFrame, table_name: str) -> pl.DataFr
         
         try:
             target_dtype = spec.dtype
+            current_dtype = df[col_name].dtype
             
-            # Special handling for datetime
+            # --- Datetime ---
             if target_dtype == pl.Datetime:
-                if df[col_name].dtype != pl.Datetime:
+                if current_dtype == pl.Utf8:
+                    # Only parse from string
                     df = df.with_columns(
-                        pl.col(col_name).str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False)
+                        pl.coalesce(
+                            pl.col(col_name).str.strptime(
+                                pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False
+                            ),
+                            pl.col(col_name).str.strptime(
+                                pl.Date, "%Y-%m-%d", strict=False
+                            ).cast(pl.Datetime),
+                        )
                     )
+                elif current_dtype == pl.Date:
+                    # Cast Date → Datetime
+                    df = df.with_columns(pl.col(col_name).cast(pl.Datetime))
+                elif current_dtype != pl.Datetime:
+                    # Attempt generic cast
+                    df = df.with_columns(pl.col(col_name).cast(pl.Datetime, strict=False))
+                # else: already Datetime, skip
             
-            # Special handling for floats
+            # --- Date ---
+            elif target_dtype == pl.Date:
+                if current_dtype == pl.Utf8:
+                    # Only parse from string
+                    df = df.with_columns(
+                        pl.col(col_name).str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    )
+                elif current_dtype == pl.Datetime:
+                    # Cast Datetime → Date
+                    df = df.with_columns(pl.col(col_name).cast(pl.Date))
+                elif current_dtype != pl.Date:
+                    # Attempt generic cast
+                    df = df.with_columns(pl.col(col_name).cast(pl.Date, strict=False))
+                # else: already Date, skip
+            
+            # --- Float ---
             elif target_dtype == pl.Float64:
                 df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
             
-            # Boolean with robust string mapping
+            # --- Boolean ---
             elif target_dtype == pl.Boolean:
-                if df[col_name].dtype == pl.Utf8:
+                if current_dtype == pl.Utf8:
                     df = df.with_columns(
                         pl.col(col_name)
                         .str.to_lowercase()
-                        .replace({"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False})
+                        .replace({
+                            "true": True, "1": True, "yes": True,
+                            "false": False, "0": False, "no": False
+                        })
                         .cast(pl.Boolean, strict=False)
                     )
                 else:
                     df = df.with_columns(pl.col(col_name).cast(pl.Boolean, strict=False))
             
-            # Integer with range validation
+            # --- Integer with range validation ---
             elif target_dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64):
                 temp_col = df[col_name].cast(pl.Int64, strict=False)
                 
@@ -296,7 +322,7 @@ def transform_dataframe(
             if before != after:
                 logger.info(f"Dropped {before - after} duplicates from {table_name}")
     
-    # Step 5: Validate quality
+    # Step 6: Validate quality
     schema = get_table_schema(table_name)
     quality_report = validate_data_quality(df, table_name, schema)
     

@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     postgres_pool_pre_ping: bool = Field(default=True, description="Verify connections before use")
     postgres_echo: bool = Field(default=False, description="Log SQL statements")
     
+    
     postgres_schema_raw: str = Field(default="raw", description="Raw data schema name")
     postgres_schema_processed: str = Field(default="processed", description="Processed features schema name")
     postgres_schema_predictions: str = Field(default="predictions", description="Predictions schema name")
