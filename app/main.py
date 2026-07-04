@@ -1,50 +1,28 @@
-from datetime import datetime
-from time import perf_counter
-from typing import Literal
-
+# File: app/main.py
+"""
+FastAPI application with Prometheus monitoring.
+"""
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from starlette.responses import Response
+from loguru import logger
 
-app = FastAPI(title='QBC12 Group04 delivery-risk API', version='1.0.0')
-REQUESTS = Counter('qbc12_prediction_requests_total', 'Prediction requests', ['risk_level'])
-LATENCY = Histogram('qbc12_prediction_latency_seconds', 'Prediction latency')
+from app.api.routes import prediction, metrics ,ingestion
+from app.monitoring.middleware import PrometheusMiddleware
+from app.core.config import settings
 
-class PredictionInput(BaseModel):
-    order_id: str
-    item_total: float = Field(ge=0)
-    freight_total: float = Field(ge=0)
-    estimated_days: float = Field(gt=0, le=90)
-    purchase_hour: int = Field(ge=0, le=23)
-    purchase_weekday: int = Field(ge=0, le=6)
+# Create FastAPI app
+app = FastAPI(
+    title="Olist Late Delivery Predictor",
+    description="MLOps API for predicting e-commerce delivery delays",
+    version="1.0.0"
+)
 
-def predict(payload: PredictionInput) -> dict:
-    # Reference baseline: bounded, explainable risk score; replace with MLflow Staging model in production.
-    score = min(0.98, max(0.01, 0.06 + 0.018 * payload.estimated_days + 0.0012 * payload.freight_total + 0.012 * (payload.purchase_hour >= 18)))
-    level: Literal['low', 'medium', 'high'] = 'high' if score >= .55 else 'medium' if score >= .25 else 'low'
-    action = {'low': 'monitor normally', 'medium': 'confirm carrier capacity', 'high': 'prioritize fulfillment intervention'}[level]
-    REQUESTS.labels(level).inc()
-    return {'order_id': payload.order_id, 'late_delivery_probability': round(score, 4), 'risk_level': level, 'recommended_action': action, 'model_version': 'group04-reference-baseline', 'latency': 0.0}
+# Add Prometheus middleware
+app.add_middleware(PrometheusMiddleware)
 
-@app.get('/health')
-def health(): return {'status': 'ok'}
+# Include routers
+app.include_router(metrics.router)
+app.include_router(prediction.router)
+app.include_router(ingestion.router)
 
-@app.get('/model-info')
-def model_info(): return {'name': 'group04-reference-baseline', 'stage': 'Staging', 'temporal_leakage_policy': 'purchase-time features only'}
 
-@app.post('/predict')
-def single_prediction(payload: PredictionInput):
-    started = perf_counter()
-    response = predict(payload)
-    response['latency'] = round(perf_counter() - started, 6)
-    return response
-
-@app.post('/batch-predict')
-def batch_prediction(payloads: list[PredictionInput]): return [single_prediction(payload) for payload in payloads]
-
-@app.get('/metrics-summary')
-def metrics_summary(): return {'generated_at': datetime.utcnow().isoformat() + 'Z', 'service': 'group04-reference-baseline'}
-
-@app.get('/metrics')
-def metrics(): return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+logger.info("FastAPI application started with Prometheus monitoring")
