@@ -42,7 +42,10 @@ services:
       AIRFLOW_DB: ${AIRFLOW_DB}
       MLFLOW_DB: ${MLFLOW_DB}
     ports:
-      - "${POSTGRES_PORT}:5432"
+      # Bound to localhost only: Postgres has no reason to be reachable from
+      # the public internet. Use an SSH tunnel for remote admin access:
+      #   ssh -L 5432:localhost:${POSTGRES_PORT} <user>@<server>
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh:ro
@@ -64,7 +67,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       MLFLOW_DB: ${MLFLOW_DB}
     ports:
-      - "${MLFLOW_PORT}:5000"
+      # Bound to localhost only: the MLflow UI/API has no built-in
+      # authentication, so it must not be reachable from the public internet.
+      #   ssh -L 5000:localhost:${MLFLOW_PORT} <user>@<server>
+      - "127.0.0.1:${MLFLOW_PORT}:5000"
     volumes:
       - mlflow-artifacts:/mlflow/artifacts
     depends_on:
@@ -147,7 +153,10 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=15d
     ports:
-      - "${PROMETHEUS_PORT}:9090"
+      # Bound to localhost only: raw metrics/target state shouldn't be public.
+      # Grafana (public, has its own login) is the intended way to view them.
+      #   ssh -L 9090:localhost:${PROMETHEUS_PORT} <user>@<server>
+      - "127.0.0.1:${PROMETHEUS_PORT}:9090"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
