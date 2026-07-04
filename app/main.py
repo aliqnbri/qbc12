@@ -1,50 +1,69 @@
-from datetime import datetime
+"""FastAPI application factory and entrypoint."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from time import perf_counter
-from typing import Literal
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from starlette.responses import Response
+from fastapi import FastAPI, Request, Response
 
-app = FastAPI(title='QBC12 Group04 delivery-risk API', version='1.0.0')
-REQUESTS = Counter('qbc12_prediction_requests_total', 'Prediction requests', ['risk_level'])
-LATENCY = Histogram('qbc12_prediction_latency_seconds', 'Prediction latency')
+from app.api.routers import metrics as metrics_router
+from app.api.routers import predict as predict_router
+from app.api.routers import service as service_router
+from app.core.config import get_settings
+from app.core.exceptions import register_exception_handlers
+from app.services.model_service import get_model_service
+from utils.logging import configure_logging, get_logger
+from utils.metrics import HTTP_REQUESTS_TOTAL, REQUEST_LATENCY_SECONDS
 
-class PredictionInput(BaseModel):
-    order_id: str
-    item_total: float = Field(ge=0)
-    freight_total: float = Field(ge=0)
-    estimated_days: float = Field(gt=0, le=90)
-    purchase_hour: int = Field(ge=0, le=23)
-    purchase_weekday: int = Field(ge=0, le=6)
+logger = get_logger(__name__)
 
-def predict(payload: PredictionInput) -> dict:
-    # Reference baseline: bounded, explainable risk score; replace with MLflow Staging model in production.
-    score = min(0.98, max(0.01, 0.06 + 0.018 * payload.estimated_days + 0.0012 * payload.freight_total + 0.012 * (payload.purchase_hour >= 18)))
-    level: Literal['low', 'medium', 'high'] = 'high' if score >= .55 else 'medium' if score >= .25 else 'low'
-    action = {'low': 'monitor normally', 'medium': 'confirm carrier capacity', 'high': 'prioritize fulfillment intervention'}[level]
-    REQUESTS.labels(level).inc()
-    return {'order_id': payload.order_id, 'late_delivery_probability': round(score, 4), 'risk_level': level, 'recommended_action': action, 'model_version': 'group04-reference-baseline', 'latency': 0.0}
 
-@app.get('/health')
-def health(): return {'status': 'ok'}
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Configure logging and load the model before serving traffic."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    get_model_service().load()
+    logger.info("%s v%s ready", settings.app_name, settings.app_version)
+    yield
 
-@app.get('/model-info')
-def model_info(): return {'name': 'group04-reference-baseline', 'stage': 'Staging', 'temporal_leakage_policy': 'purchase-time features only'}
 
-@app.post('/predict')
-def single_prediction(payload: PredictionInput):
-    started = perf_counter()
-    response = predict(payload)
-    response['latency'] = round(perf_counter() - started, 6)
-    return response
+def create_app() -> FastAPI:
+    """Build the FastAPI application with routers, middleware and handlers."""
+    settings = get_settings()
+    app = FastAPI(
+        title=settings.app_name,
+        version=settings.app_version,
+        description=(
+            "Predicts late-delivery risk for Olist orders using purchase-time "
+            "features only. Backed by an MLflow-registered sklearn pipeline."
+        ),
+        lifespan=lifespan,
+    )
 
-@app.post('/batch-predict')
-def batch_prediction(payloads: list[PredictionInput]): return [single_prediction(payload) for payload in payloads]
+    @app.middleware("http")
+    async def record_http_metrics(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        started = perf_counter()
+        response = await call_next(request)
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", request.url.path)
+        HTTP_REQUESTS_TOTAL.labels(
+            method=request.method, endpoint=endpoint, status=str(response.status_code)
+        ).inc()
+        REQUEST_LATENCY_SECONDS.labels(method=request.method, endpoint=endpoint).observe(
+            perf_counter() - started
+        )
+        return response
 
-@app.get('/metrics-summary')
-def metrics_summary(): return {'generated_at': datetime.utcnow().isoformat() + 'Z', 'service': 'group04-reference-baseline'}
+    register_exception_handlers(app)
+    app.include_router(service_router.router)
+    app.include_router(predict_router.router)
+    app.include_router(metrics_router.router)
+    return app
 
-@app.get('/metrics')
-def metrics(): return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+app = create_app()

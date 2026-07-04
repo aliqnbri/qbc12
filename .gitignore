@@ -9,3 +9,6 @@ htmlcov/
 data/
 artifacts/
 mlruns/
+mlflow.db
+airflow/logs/
+*.joblib
